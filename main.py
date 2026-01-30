@@ -1,53 +1,76 @@
-from dotenv import load_dotenv
-from pydantic import BaseModel
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from tools import search_tool, wiki_tool, save_tool
+import requests
+import time
 
-load_dotenv()
+GUMLOOP_API_KEY = "8556c06b71de440d965718fd8e19d352"
+GUMLOOP_USER_ID = "hx5C9Y6io9enVlAg3TKHaB2gdvJ3"
+GUMLOOP_PIPELINE_ID = "6oKS6Ca67hQdgqnXDVhYDL"
 
-class ResearchResponse(BaseModel):
-    topic: str
-    summary: str
-    sources: list[str]
-    tools_used: list[str]
-    
+def start_pipeline(query: str) -> dict:
+    """Start the Gumloop pipeline with the research query."""
+    url = "https://api.gumloop.com/api/v1/start_pipeline"
+    params = {
+        "api_key": GUMLOOP_API_KEY,
+        "user_id": GUMLOOP_USER_ID,
+        "saved_item_id": GUMLOOP_PIPELINE_ID
+    }
+    payload = {
+        "pipeline_inputs": [
+            {"input_name": "input", "value": query}
+        ]
+    }
 
-llm = ChatAnthropic(model="claude-3-5-sonnet-20241022")
-parser = PydanticOutputParser(pydantic_object=ResearchResponse)
+    response = requests.post(url, params=params, json=payload)
+    return response.json()
 
-prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """
-            You are a research assistant that will help generate a research paper.
-            Answer the user query and use neccessary tools. 
-            Wrap the output in this format and provide no other text\n{format_instructions}
-            """,
-        ),
-        ("placeholder", "{chat_history}"),
-        ("human", "{query}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ]
-).partial(format_instructions=parser.get_format_instructions())
+def get_pipeline_run(run_id: str) -> dict:
+    """Get the status/result of a pipeline run."""
+    url = f"https://api.gumloop.com/api/v1/get_pl_run"
+    params = {
+        "api_key": GUMLOOP_API_KEY,
+        "user_id": GUMLOOP_USER_ID,
+        "run_id": run_id
+    }
 
-tools = [search_tool, wiki_tool, save_tool]
-agent = create_tool_calling_agent(
-    llm=llm,
-    prompt=prompt,
-    tools=tools
-)
+    response = requests.get(url, params=params)
+    return response.json()
 
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-query = input("What can i help you research? ")
-raw_response = agent_executor.invoke({"query": query})
+def main():
+    query = input("What can I help you research? ")
 
-try:
-    structured_response = parser.parse(raw_response.get("output")[0]["text"])
-    print(structured_response)
-except Exception as e:
-    print("Error parsing response", e, "Raw Response - ", raw_response)
+    print(f"\nStarting research on: {query}")
+    print("-" * 50)
+
+    # Start the pipeline
+    result = start_pipeline(query)
+    print(f"Pipeline started: {result}")
+
+    # If we get a run_id, poll for results
+    if "run_id" in result:
+        run_id = result["run_id"]
+        print(f"Run ID: {run_id}")
+        print("Waiting for results...")
+
+        # Poll for completion
+        for _ in range(60):  # Max 60 attempts (2 minutes)
+            time.sleep(2)
+            status = get_pipeline_run(run_id)
+            state = status.get("state", "unknown")
+            print(f"Status: {state}")
+
+            if state == "DONE":
+                print("\n" + "=" * 50)
+                print("RESEARCH RESULTS:")
+                print("=" * 50)
+                outputs = status.get("outputs", {})
+                for key, value in outputs.items():
+                    print(f"\n{key}:")
+                    print(value)
+                break
+            elif state in ["FAILED", "ERROR"]:
+                print(f"Pipeline failed: {status}")
+                break
+    else:
+        print(f"Response: {result}")
+
+if __name__ == "__main__":
+    main()
